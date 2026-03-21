@@ -423,32 +423,59 @@ html,body{height:100%;font-family:var(--sans);background:var(--paper);color:var(
 // ═══════════════════════════════════
 // STATE
 // ═══════════════════════════════════
-let assignments = [];
-let nextId = 1;
-let pendingFile = null;
+window.assignments = [];
+var pendingFile = null;
+
+async function loadAssignments() {
+  try {
+    const res = await fetch('/api/assignments');
+    if (res.ok) {
+      window.assignments = await res.json();
+      if(document.getElementById('admin-portal').classList.contains('active')) {
+        if (typeof renderAdmin === 'function') renderAdmin();
+      }
+      if(document.getElementById('student-portal').classList.contains('active')) {
+        if (typeof renderStudent === 'function') renderStudent();
+      }
+    }
+  } catch(e) {
+    console.error("Failed to load assignments", e);
+  }
+}
+
+// Initial load and periodic refresh to share state across devices
+loadAssignments();
+setInterval(loadAssignments, 5000);
 
 // ═══════════════════════════════════
 // AUTH
 // ═══════════════════════════════════
-const ADMIN_USER = 'admin';
-const ADMIN_PASS = 'kec123';
-
-function doLogin(){
-  const u=document.getElementById('login-user').value.trim();
-  const p=document.getElementById('login-pass').value;
-  const err=document.getElementById('login-error');
-  if(u===ADMIN_USER && p===ADMIN_PASS){
-    err.classList.remove('show');
-    document.getElementById('login-user').value='';
-    document.getElementById('login-pass').value='';
-    showScreen('admin-portal');
-  } else {
+async function doLogin(){
+  const u = document.getElementById('login-user').value.trim();
+  const p = document.getElementById('login-pass').value;
+  const err = document.getElementById('login-error');
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    if (res.ok) {
+      err.classList.remove('show');
+      document.getElementById('login-user').value = '';
+      document.getElementById('login-pass').value = '';
+      showScreen('admin-portal');
+    } else {
+      err.classList.add('show');
+      document.getElementById('login-pass').value = '';
+      document.getElementById('login-pass').focus();
+    }
+  } catch (e) {
     err.classList.add('show');
-    document.getElementById('login-pass').value='';
-    document.getElementById('login-pass').focus();
   }
 }
-function doLogout(){
+async function doLogout(){
+  try { await fetch('/api/logout', { method: 'POST' }); } catch(e) {}
   showScreen('landing');
   showToast('Signed out successfully');
 }
@@ -656,42 +683,62 @@ function formatBytes(b){
   return (b/(1024*1024)).toFixed(1)+' MB';
 }
 
-function createAssignment(){
+async function createAssignment(){
   const title=document.getElementById('f-title').value.trim();
   const course=document.getElementById('f-course').value.trim();
   const desc=document.getElementById('f-desc').value.trim();
   const due=document.getElementById('f-due').value;
   if(!title||!course||!due) return;
 
-  let pdfUrl=null,pdfName=null,pdfSize=null;
-  if(pendingFile){
-    // In a real app: upload to server, get URL back
-    // Here we create a local blob URL so download actually works in demo
-    pdfUrl=URL.createObjectURL(pendingFile);
-    pdfName=pendingFile.name;
-    pdfSize=formatBytes(pendingFile.size);
+  const btn = document.getElementById('btn-submit');
+  btn.disabled = true;
+  btn.textContent = "Posting...";
+
+  try {
+    const fd = new FormData();
+    fd.append('title', title);
+    fd.append('course', course);
+    fd.append('desc', desc);
+    fd.append('due', due);
+    if(pendingFile) fd.append('pdf', pendingFile);
+
+    const res = await fetch('/api/assignments', {
+      method: 'POST',
+      body: fd
+    });
+
+    if(!res.ok) {
+      if(res.status === 401) { showToast('⚠️ Session expired. Please log in again.'); return; }
+      throw new Error('Failed to post');
+    }
+
+    closeForm();
+    await loadAssignments();
+    showToast('✅ Assignment posted to server!');
+  } catch(e) {
+    console.error(e);
+    showToast('⚠️ Error posting assignment');
+  } finally {
+    btn.textContent = "Post Assignment";
+    btn.disabled = false;
   }
-
-  assignments.unshift({
-    id:nextId++,
-    title,course,desc,due,
-    pdfName,pdfUrl,pdfSize,
-    createdAt:new Date().toISOString()
-  });
-
-  closeForm();
-  renderAdmin();
-  showToast('✅ Assignment posted — students can now see it');
 }
 
 // ═══════════════════════════════════
 // DELETE
 // ═══════════════════════════════════
-function deleteAssignment(id){
+async function deleteAssignment(id){
   if(!confirm('Delete this assignment? Students will no longer see it.')) return;
-  assignments=assignments.filter(a=>a.id!==id);
-  renderAdmin();
-  showToast('🗑 Assignment deleted');
+  try {
+    const res = await fetch('/api/assignments/' + id, { method: 'DELETE' });
+    if(res.ok) {
+       await loadAssignments();
+       showToast('🗑 Assignment deleted');
+    } else {
+       if(res.status === 401) showToast('⚠️ Session expired');
+       else throw new Error('Failed');
+    }
+  } catch(e) { console.error(e); showToast('⚠️ Delete failed'); }
 }
 
 // ═══════════════════════════════════
@@ -708,9 +755,6 @@ function downloadPdf(id){
     link.download=a.pdfName;
     link.click();
     showToast('⬇️ Downloading '+a.pdfName);
-  } else {
-    // Demo pre-seeded assignments (no real file)
-    showToast('📋 Demo: In production, "'+a.pdfName+'" would download here');
   }
 }
 
